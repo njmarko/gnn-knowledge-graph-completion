@@ -37,17 +37,6 @@ def get_data_loader(opt):
     loader = DataLoader(data, opt.batch_size, opt.shuffle)
     return loader
 
-def show_batch(image_batch, label_batch):
-    plt.figure(figsize=(20, 20))
-    for n in range(25):
-        plt.subplot(5, 5, n + 1)
-        img = image_batch[n]
-        plt.imshow(cv2.cvtColor(img.squeeze().numpy(), cv2.COLOR_GRAY2RGB))
-        label = label_batch[n].numpy()
-        plt.title(label)
-        plt.axis('off')
-    plt.show()
-
 
 def train(model, optimizer, data_loader, opt, scheduler=None):
     model.train()
@@ -228,11 +217,6 @@ def create_arg_parser(model_choices=None, optimizer_choices=None, scheduler_choi
     parser.add_argument('-b', '--batch_size', type=int, default=1, help="Batch size")
     parser.add_argument('-shuffle', '--shuffle', type=bool, default=False, help="Shuffle dataset")
     parser.add_argument('-nw', '--num_workers', type=int, default=0, help="Number of workers to be used")
-    parser.add_argument('-nc', '--num_classes', type=int, default=3, help="Number of classes that can be detected")
-    parser.add_argument('-ts', '--training_split', type=float, default=0.8, help="Train split between 0 and 1")
-    parser.add_argument('-vs', '--validation_split', type=float, default=0.1, help="Validation split between 0 and 1")
-    parser.add_argument('-es', '--evaluation_split', type=float, default=0.1,
-                        help="Evaluation (test) split between 0 and 1")
     parser.add_argument('-seed_dataset', '--seed_dataset', type=int, default=-1, help="Set random seed for dataset")
 
     # Model options
@@ -242,13 +226,8 @@ def create_arg_parser(model_choices=None, optimizer_choices=None, scheduler_choi
     parser.add_argument('-depth', '--depth', type=int, default=2, help="Model depth")
     parser.add_argument('-in_channels', '--in_channels', type=int, default=1, help="Number of in channels")
     parser.add_argument('-out_channels', '--out_channels', type=int, default=8, help="Number of out channels")
-    parser.add_argument('-kernel_dim', '--kernel_dim', type=int, default=3,
-                        help="Kernel dimension used by CNN models")
     parser.add_argument('-mlp_dim', '--mlp_dim', type=int, default=3,
                         help="Dimension of mlp at the end of the model. Should be the same as the number of classes")
-    parser.add_argument('-padding', '--padding', type=int, default=1, help="Padding used by CNN models")
-    parser.add_argument('-stride', '--stride', type=int, default=1, help="Stride used by CNN models")
-    parser.add_argument('-max_pool', '--max_pool', type=int, default=3, help="Max pool dimensions used by CNN models")
     parser.add_argument('-dropout', '--dropout', type=float, default=0.2, help="Dropout used in models")
 
     # Training options
@@ -261,18 +240,6 @@ def create_arg_parser(model_choices=None, optimizer_choices=None, scheduler_choi
                         help="Number of parallel processes to spawn for models [0 for all available cores]")
     parser.add_argument('-seed_everything', '--seed_everything', type=int, default=-1,
                         help="Set random seed for everything")
-    parser.add_argument('-min_score', '--min_score', type=int, default=50,
-                        help="Minimum score up to which the models will be trained")
-    parser.add_argument('-max_score', '--max_score', type=int, default=99,
-                        help="Maximum score up to which the models will be trained")
-    parser.add_argument('-model_max_score', '--model_max_score', type=int, default=99,
-                        help="Maximum score up to which the current model will be trained")
-    parser.add_argument('-score_step', '--score_step', type=int, default=1,
-                        help="Step between two nearest scores of consecutive models, up to which they are trained")
-    parser.add_argument('-save_val_images', '--save_val_images', type=bool, default=False,
-                        help="Save validation images on which the model made mistakes in the last epoch")
-    parser.add_argument('-save_test_images', '--save_test_images', type=bool, default=False,
-                        help="Save test images on which the model made mistakes.")
 
     # Optimizer options
     parser.add_argument('-optim', '--optimizer', type=str.lower, default="adamw",
@@ -526,7 +493,7 @@ def run_experiment(model_id, *args, **kwargs):
         #  Maybe even as an image if it can be visualized with some library
         # pytorch_total_params = sum(p.numel() for p in model.parameters())
         # print(pytorch_total_params)
-        eval_metrics = validation(model=model, data_loader=test_loader, opt=opt, save_images=opt.save_test_images)
+        eval_metrics = validation(model=model, data_loader=data_loader, opt=opt, save_images=opt.save_test_images)
         eval_metrics.update(create_wandb_val_plots(val_metrics=eval_metrics, save_images=opt.save_test_images))
         del_wandb_val_untracked_metrics(val_metrics=eval_metrics)
         wandb.log(eval_metrics)
