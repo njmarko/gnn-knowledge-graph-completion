@@ -210,6 +210,8 @@ def create_arg_parser(model_choices=None, optimizer_choices=None, scheduler_choi
                         help="Save best model to wandb run.")
     parser.add_argument('-job_type', '--job_type', type=str, default="train",
                         help="Job type {train, eval}.")
+    parser.add_argument('-tags', '--tags', nargs="*", type=str, default="train",
+                        help="Add a list of tags that describe the run.")
 
     # Dataset options
     parser.add_argument('-d', '--dataset', type=str, default="data/generated_images/dataset3",
@@ -375,7 +377,7 @@ def run_experiment(model_id, *args, **kwargs):
     if opt.device == 'cuda':
         print(f'GPU {torch.cuda.get_device_name(0)}')
 
-    data_loader = get_data_loader(opt)  # TODO: loaders for GNN
+    data_loader = get_data_loader(opt)
 
     # TODO: Determine optimal step_size_up for cyclicLR scheduler.
     # TODO: Change step_size_up formula for graph dataset
@@ -472,8 +474,7 @@ def run_experiment(model_id, *args, **kwargs):
     wb_run_eval = wandb.init(entity=opt.entity, project=opt.project_name, group=opt.group,
                              # save_code=True, # Pycharm complains about duplicate code fragments
                              job_type=opt.job_type,
-                             # TODO: Replace with tags argument from argparser once its added
-                             tags=['variable_max_score'],
+                             tags=opt.tags,
                              name=f'{model_id}_eval',
                              config=opt,
                              )
