@@ -33,7 +33,7 @@ import wandb
 
 
 def get_data_loader(opt):
-    data = word_net.WordNet18RR("./data/wordnet18rrtemp")
+    data = word_net.WordNet18RR(opt.dataset)
     loader = DataLoader(data, opt.batch_size, opt.shuffle)
     return loader
 
@@ -214,7 +214,7 @@ def create_arg_parser(model_choices=None, optimizer_choices=None, scheduler_choi
                         help="Add a list of tags that describe the run.")
 
     # Dataset options
-    parser.add_argument('-d', '--dataset', type=str, default="data/generated_images/dataset3",
+    parser.add_argument('-d', '--dataset', type=str, default="data/wordnet18rrtemp",
                         help="Path to the dataset")
     parser.add_argument('-b', '--batch_size', type=int, default=1, help="Batch size")
     parser.add_argument('-shuffle', '--shuffle', type=bool, default=False, help="Shuffle dataset")
