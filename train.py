@@ -25,9 +25,17 @@ from torch_geometric.nn import GCN, RGCNConv, FastRGCNConv
 import torch.nn.functional as F
 from torch_geometric.nn import GCNConv
 from torch_geometric.transforms import NormalizeFeatures
+import torch_geometric.datasets.word_net
+from torch_geometric.nn.conv.rgcn_conv import RGCNConv
+from torch_geometric.loader.dataloader import DataLoader
 
 import wandb
 
+
+def get_data_loader(opt):
+    data = word_net.WordNet18RR("./data/wordnet18rrtemp")
+    loader = DataLoader(data, opt.batch_size, opt.shuffle)
+    return loader
 
 def show_batch(image_batch, label_batch):
     plt.figure(figsize=(20, 20))
@@ -217,8 +225,8 @@ def create_arg_parser(model_choices=None, optimizer_choices=None, scheduler_choi
     # Dataset options
     parser.add_argument('-d', '--dataset', type=str, default="data/generated_images/dataset3",
                         help="Path to the dataset")
-    parser.add_argument('-b', '--batch_size', type=int, default=32, help="Batch size")
-    parser.add_argument('-shuffle', '--shuffle', type=bool, default=True, help="Shuffle dataset")
+    parser.add_argument('-b', '--batch_size', type=int, default=1, help="Batch size")
+    parser.add_argument('-shuffle', '--shuffle', type=bool, default=False, help="Shuffle dataset")
     parser.add_argument('-nw', '--num_workers', type=int, default=0, help="Number of workers to be used")
     parser.add_argument('-nc', '--num_classes', type=int, default=3, help="Number of classes that can be detected")
     parser.add_argument('-ts', '--training_split', type=float, default=0.8, help="Train split between 0 and 1")
@@ -400,11 +408,12 @@ def run_experiment(model_id, *args, **kwargs):
     if opt.device == 'cuda':
         print(f'GPU {torch.cuda.get_device_name(0)}')
 
-    train_loader, val_loader, test_loader = None  # TODO: loaders for GNN
+    data_loader = get_data_loader(opt)  # TODO: loaders for GNN
 
     # TODO: Determine optimal step_size_up for cyclicLR scheduler.
+    # TODO: Change step_size_up formula for graph dataset
     if opt.step_size_up <= 0:
-        opt.step_size_up = 2 * len(train_loader.dataset) // opt.batch_size
+        opt.step_size_up = 2 * len(data_loader.dataset) // opt.batch_size
 
     wb_run_train = wandb.init(entity=opt.entity, project=opt.project_name, group=opt.group,
                               # save_code=True, # Pycharm complains about duplicate code fragments
@@ -444,9 +453,9 @@ def run_experiment(model_id, *args, **kwargs):
         # TODO: Add training resuming. This can be done from the model saved in wandb or from the local model
         for epoch in range(1, opt.n_epochs + 1):
             print(f"{epoch=}")
-            train_metrics = train(model=model, optimizer=optimizer, data_loader=train_loader, opt=opt,
+            train_metrics = train(model=model, optimizer=optimizer, data_loader=data_loader, opt=opt,
                                   scheduler=scheduler)
-            val_metrics = validation(model=model, data_loader=val_loader, opt=opt, save_images=opt.save_val_images)
+            val_metrics = validation(model=model, data_loader=data_loader, opt=opt, save_images=opt.save_val_images)
 
             # TODO: Add early stopping - Maybe not needed for this experiment. In that case log tables before ending
             last = epoch >= opt.n_epochs

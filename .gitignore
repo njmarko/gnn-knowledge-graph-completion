@@ -127,3 +127,7 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+/data/
+/wandb/
+/wordnet18rrtemp/
+.idea/
