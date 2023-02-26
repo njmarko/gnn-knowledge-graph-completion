@@ -223,12 +223,14 @@ def create_arg_parser(model_choices=None, optimizer_choices=None, scheduler_choi
     parser.add_argument('-seed_dataset', '--seed_dataset', type=int, default=-1, help="Set random seed for dataset")
 
     # Model options
-    parser.add_argument('-m', '--model', type=str.lower, default="",
+    parser.add_argument('-m', '--model', type=str.lower, default="RGCN",
                         choices=model_choices.keys(),
                         help=f"Model to be used for training {model_choices.keys()}")
-    parser.add_argument('-depth', '--depth', type=int, default=2, help="Model depth")
-    parser.add_argument('-in_channels', '--in_channels', type=int, default=1, help="Number of in channels")
-    parser.add_argument('-out_channels', '--out_channels', type=int, default=8, help="Number of out channels")
+    # - RGCN
+    parser.add_argument('-depth', '--depth', type=int, default=0, help="Model depth")
+    parser.add_argument('-hidden_dim', '--hidden_dim', type=int, default=8, help="Number of hidden dims")
+    parser.add_argument('-out_dim', '--out_dim', type=int, default=8, help="Number of out channels")
+    parser.add_argument('-num_bases', '--num_bases', type=int, default=8, help="Number of bases")
     parser.add_argument('-mlp_dim', '--mlp_dim', type=int, default=3,
                         help="Dimension of mlp at the end of the model. Should be the same as the number of classes")
     parser.add_argument('-dropout', '--dropout', type=float, default=0.2, help="Dropout used in models")
@@ -392,10 +394,9 @@ def run_experiment(model_id, *args, **kwargs):
                               )
 
     # Define model
-    model = model_choices[opt.model](depth=opt.depth, in_channels=opt.in_channels, out_channels=opt.out_channels,
-                                     kernel_dim=opt.kernel_dim, mlp_dim=opt.mlp_dim, padding=opt.padding,
-                                     stride=opt.stride, max_pool=opt.max_pool,
-                                     dropout=opt.dropout)  # TODO: Add appropriate model parameters
+    model = model_choices[opt.model](num_nodes=data_loader.dataset.data.num_nodes, h_dim=opt.hidden_dim,
+                                     out_dim=opt.out_dim, num_rels=len(np.unique(data_loader.dataset.data.edge_type)),
+                                     num_bases=opt.num_bases, num_h_layers=opt.depth)
 
     model = model.to(opt.device)
 
