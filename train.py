@@ -30,6 +30,7 @@ from torch_geometric.nn.conv.rgcn_conv import RGCNConv
 from torch_geometric.loader.dataloader import DataLoader
 
 import wandb
+from model.RGCN import RGCN
 
 
 def get_data_loader(opt):
@@ -351,16 +352,14 @@ def _proc_starter(f, args, kwargs):
     return f, *f(*args, **kwargs)
 
 
+def key_pair(module) -> tuple:
+    return module.__name__.lower(), module
+
+
 def run_experiment(model_id, *args, **kwargs):
-    # Model options
-    model_choices = {}  # TODO: Add GNN model for knowledge graph completion
-
-    optimizer_choices = {optim.AdamW.__name__.lower(): optim.AdamW,
-                         optim.SGD.__name__.lower(): optim.SGD}  # TODO: Add more optimizer choices
-
-    # Scheduler options
-    scheduler_choices = {
-        optim.lr_scheduler.CyclicLR.__name__.lower(): optim.lr_scheduler.CyclicLR, }  # TODO: Add more scheduler choices
+    model_choices = dict(map(key_pair, [RGCN]))
+    optimizer_choices = dict(map(key_pair, [optim.AdamW, optim.SGD]))
+    scheduler_choices = dict(map(key_pair, [optim.lr_scheduler.CyclicLR]))
 
     parser = create_arg_parser(model_choices=model_choices, optimizer_choices=optimizer_choices,
                                scheduler_choices=scheduler_choices)
