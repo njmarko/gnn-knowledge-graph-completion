@@ -386,8 +386,7 @@ def run_experiment(model_id, *args, **kwargs):
     wb_run_train = wandb.init(entity=opt.entity, project=opt.project_name, group=opt.group,
                               # save_code=True, # Pycharm complains about duplicate code fragments
                               job_type=opt.job_type,
-                              # TODO: Add tags as arguments for argparser
-                              tags=['variable_max_score'],
+                              tags=opt.tags,
                               name=f'{model_id}_train',
                               config=opt,
                               )
