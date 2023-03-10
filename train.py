@@ -1,33 +1,19 @@
+import os
 import argparse
 import os
 import random
-import re
 import timeit
 from itertools import cycle, islice, repeat
 from pathlib import Path
 
-import cv2
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.multiprocessing as mp
 import torch.nn.functional as F
 from torch import optim
-from torchmetrics import MetricCollection
-from torchmetrics.classification import MulticlassF1Score, MulticlassPrecision, MulticlassRecall, MulticlassAUROC
-
-import argparse
-import numpy as np
-import torch
-from torch_geometric.loader import DataLoader
 from torch_geometric.datasets import word_net, RelLinkPredDataset
-from torch_geometric.nn import GCN, RGCNConv, FastRGCNConv, GAE
-import torch.nn.functional as F
-from torch_geometric.nn import GCNConv
-from torch_geometric.transforms import NormalizeFeatures
-import torch_geometric.datasets.word_net
-from torch_geometric.nn.conv.rgcn_conv import RGCNConv
 from torch_geometric.loader.dataloader import DataLoader
+from torch_geometric.nn import GAE
 from tqdm import tqdm
 
 import wandb
