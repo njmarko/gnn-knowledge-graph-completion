@@ -34,6 +34,9 @@ import wandb
 from model.RGCN import RGCNEncoder, RGCNDecoder
 
 
+# RGCN parts of code are based on the official implementation
+# https://github.com/pyg-team/pytorch_geometric/blob/master/examples/rgcn_link_pred.py
+
 def get_data_loader(opt):
     data = word_net.WordNet18RR(opt.dataset)
     loader = DataLoader(data, opt.batch_size, opt.shuffle)
@@ -68,84 +71,62 @@ def train(model, optimizer, data, opt):
     return log_metrics
 
 
-def validation(model, data_loader, opt, save_images=False):
+@torch.no_grad()
+def validation(model, data, edge_index, edge_type, opt, save_images=False):
     model.eval()
-
-    total_samples = len(data_loader.dataset)
-
-    global_target = torch.tensor([], device=opt.device)
-    global_pred = torch.tensor([], device=opt.device)
-    global_probs = torch.empty((0, 3), device=opt.device)
-    incorrect_img_paths = []
-    incorrect_img_labels = torch.tensor([], device=opt.device)
-    incorrect_img_predictions = torch.tensor([], device=opt.device)
-    incorrect_images = torch.tensor([], device=opt.device)
-
-    running_loss = 0.0
-
-    metrics = MetricCollection({'val_f1_micro': MulticlassF1Score(num_classes=opt.num_classes, average='micro'),
-                                'val_f1_macro': MulticlassF1Score(num_classes=opt.num_classes, average='macro'),
-                                'val_precision': MulticlassPrecision(num_classes=opt.num_classes),
-                                'val_recall': MulticlassRecall(num_classes=opt.num_classes),
-                                }
-                               ).to(opt.device)
-    auroc = MulticlassAUROC(num_classes=opt.num_classes, average='macro').to(opt.device)
     start_time = timeit.default_timer()
-    with torch.no_grad():
-        for data, target, path in data_loader:
-            data = data.to(opt.device)
-            target = target.to(opt.device)
-            res = model(data)
-            probs = F.softmax(res, dim=1)
-            probs = probs.to(opt.device)
-            loss = F.nll_loss(probs, target, reduction='sum')
-            _, pred = torch.max(probs, dim=1)
 
-            incorrect_img_paths += [path[i] for i in range(len(path)) if pred[i] != target[i]]
-            incorrect_img_labels = torch.concatenate((incorrect_img_labels, target[pred != target]))
-            incorrect_img_predictions = torch.concatenate((incorrect_img_predictions, pred[pred != target]))
-            if save_images:
-                incorrect_images = torch.concatenate((incorrect_images, data[pred != target]))
+    enc = model.encode(data.edge_index, data.edge_type)
 
-            metrics(pred, target)
-            global_target = torch.concatenate((global_target, target))
-            global_pred = torch.concatenate((global_pred, pred))
-            global_probs = torch.vstack((global_probs, probs))
+    ranks = []
+    for i in tqdm(range(edge_type.numel())):
+        (src, dst), rel = edge_index[:, i], edge_type[i]
 
-            running_loss += loss.item() * data.size(0)
+        # Try all nodes as tails, but delete true triplets:
+        tail_mask = torch.ones(data.num_nodes, dtype=torch.bool)
+        for (heads, tails), types in [
+            (data.train_edge_index, data.train_edge_type),
+            (data.valid_edge_index, data.valid_edge_type),
+            (data.test_edge_index, data.test_edge_type),
+        ]:
+            tail_mask[tails[(heads == src) & (types == rel)]] = False
 
-    epoch_loss = running_loss / total_samples
+        tail = torch.arange(data.num_nodes)[tail_mask]
+        tail = torch.cat([torch.tensor([dst]), tail])
+        head = torch.full_like(tail, fill_value=src)
+        eval_edge_index = torch.stack([head, tail], dim=0)
+        eval_edge_type = torch.full_like(tail, fill_value=rel)
+
+        out = model.decode(enc, eval_edge_index, eval_edge_type)
+        rank = compute_rank(out)
+        ranks.append(rank)
+
+        # Try all nodes as heads, but delete true triplets:
+        head_mask = torch.ones(data.num_nodes, dtype=torch.bool)
+        for (heads, tails), types in [
+            (data.train_edge_index, data.train_edge_type),
+            (data.valid_edge_index, data.valid_edge_type),
+            (data.test_edge_index, data.test_edge_type),
+        ]:
+            head_mask[heads[(tails == dst) & (types == rel)]] = False
+
+        head = torch.arange(data.num_nodes)[head_mask]
+        head = torch.cat([torch.tensor([src]), head])
+        tail = torch.full_like(head, fill_value=dst)
+        eval_edge_index = torch.stack([head, tail], dim=0)
+        eval_edge_type = torch.full_like(head, fill_value=rel)
+
+        out = model.decode(enc, eval_edge_index, eval_edge_type)
+        rank = compute_rank(out)
+        ranks.append(rank)
+
+    mrr = (1. / torch.tensor(ranks, dtype=torch.float)).mean()
 
     epoch_time = timeit.default_timer() - start_time
 
-    auroc(global_probs, global_target.long())
-    global_target = global_target.cpu().detach().numpy()
-    global_pred = global_pred.cpu().detach().numpy()
-    global_probs = global_probs.cpu().detach().numpy()
-    incorrect_img_labels = incorrect_img_labels.cpu().detach().numpy()
-    incorrect_img_predictions = incorrect_img_predictions.cpu().detach().numpy()
-    incorrect_images = incorrect_images.cpu().detach().numpy()
-
-    diff_mistakes = [int(re.search(r"(?<=diff)[0-9]", i).group()) for i in incorrect_img_paths]
-    shapes_mistakes = [re.search(r"ellipse|triangle|square", i).group() for i in incorrect_img_paths]
-    shape_diff_mistakes = [f"{s}_{d}" for s, d in zip(shapes_mistakes, diff_mistakes)]
-
     log_metrics = {
-        **metrics.compute(),
-        "val_epoch_loss": epoch_loss,
+        "mrr": mrr,
         "val_evaluation_time": epoch_time,
-        "val_auroc_macro": auroc.compute(),
-        # Values below are used for constructing the wandb plots and tables.
-        # They should be deleted after they are used for creating plots and tables, and they should not be logged
-        "val_global_probs": global_probs,
-        "val_global_target": global_target,
-        "val_diff_mistakes": diff_mistakes,
-        "val_shapes_mistakes": shapes_mistakes,
-        "val_shape_diff_mistakes": shape_diff_mistakes,
-        "val_incorrect_img_paths": incorrect_img_paths,
-        "val_incorrect_images": incorrect_images,
-        "val_incorrect_img_predictions": incorrect_img_predictions,
-        "val_incorrect_img_labels": incorrect_img_labels,
     }
     return log_metrics
 
@@ -321,8 +302,6 @@ def key_pair(module) -> tuple:
     return module.__name__.lower(), module
 
 
-# Rank computation from
-# https://github.com/pyg-team/pytorch_geometric/blob/master/examples/rgcn_link_pred.py
 @torch.no_grad()
 def compute_rank(ranks):
     # fair ranking prediction as the average
@@ -333,8 +312,6 @@ def compute_rank(ranks):
     return (optimistic + pessimistic).float() * 0.5
 
 
-# Dataset sampling from
-# https://github.com/pyg-team/pytorch_geometric/blob/master/examples/rgcn_link_pred.py
 def negative_sampling(edge_index, num_nodes):
     # Sample edges by corrupting either the subject or the object of each edge.
     mask_1 = torch.rand(edge_index.size(1)) < 0.5
@@ -390,7 +367,7 @@ def run_experiment(model_id, *args, **kwargs):
     optimizer = optimizer_choices[opt.optimizer](params=model.parameters(), lr=opt.learning_rate,
                                                  weight_decay=opt.weight_decay)
 
-    best_model_f1_macro = -np.Inf
+    best_model_mrr = -np.Inf
     best_model_path = None
     artifact = wandb.Artifact(
         name=f'{model_id}.pt',
@@ -400,36 +377,23 @@ def run_experiment(model_id, *args, **kwargs):
         for epoch in range(1, opt.n_epochs + 1):
             print(f"{epoch=}")
             train_metrics = train(model=model, optimizer=optimizer, data=data, opt=opt)
-            val_metrics = validation(model=model, optimizer=optimizer, data=data, opt=opt)
-
-            last = epoch >= opt.n_epochs
-            if last:
-                train_metrics.update(create_wandb_train_plots(train_metrics=train_metrics))
-                val_metrics.update(create_wandb_val_plots(val_metrics=val_metrics, save_images=opt.save_val_images))
-
-            del_wandb_train_untracked_metrics(train_metrics=train_metrics)
-            del_wandb_val_untracked_metrics(val_metrics=val_metrics)
+            val_metrics = validation(model=model, optimizer=optimizer, data=data, edge_index=data.valid_edge_index,
+                                     edge_type=data.valid_edge_type, opt=opt)
 
             wandb.log(train_metrics)
             wandb.log(val_metrics)
 
-            if val_metrics['val_f1_macro'] > best_model_f1_macro:
-                print(f"Saving model with new best {val_metrics['val_f1_macro']=}")
-                best_model_f1_macro, best_epoch = val_metrics['val_f1_macro'], epoch
+            if val_metrics['mrr'] > best_model_mrr:
+                print(f"Saving model with new best {val_metrics['mrr']=}")
+                best_model_mrr, best_epoch = val_metrics['mrr'], epoch
                 Path(f'experiments/{opt.group}').mkdir(exist_ok=True, parents=True)
                 new_best_path = os.path.join(f'experiments/{opt.group}',
                                              f'train-{opt.group}-{model_id}-max_epochs{opt.n_epochs}-epoch{epoch}'
-                                             f'-metric{val_metrics["val_f1_macro"]:.4f}.pt')
+                                             f'-metric{val_metrics["mrr"]:.4f}.pt')
                 torch.save(model.state_dict(), new_best_path)
                 if best_model_path:
                     os.remove(best_model_path)
                 best_model_path = new_best_path
-
-            if last:
-                print(
-                    f"Finished training a {model_id=}"
-                    f"with va_f1_macro {val_metrics['val_f1_macro']}")
-                break
 
         if opt.save_model_wandb:
             artifact.add_file(best_model_path)
@@ -439,7 +403,6 @@ def run_experiment(model_id, *args, **kwargs):
 
     except FileNotFoundError as e:
         wb_run_train.finish()
-        # wb_run_train.delete()  # Delete train run if an error has occurred
         print(f"Exception happened for model {model_id}\n {e}")
         return [model_id, *args], {
             **kwargs}, True  # Run Failed is True
@@ -454,108 +417,27 @@ def run_experiment(model_id, *args, **kwargs):
                              config=opt,
                              )
 
-    model = model_choices[opt.model](depth=opt.depth, in_channels=opt.in_channels, out_channels=opt.out_channels,
-                                     kernel_dim=opt.kernel_dim, mlp_dim=opt.mlp_dim, padding=opt.padding,
-                                     stride=opt.stride, max_pool=opt.max_pool,
-                                     dropout=opt.dropout)
-    # TODO: Load model from wandb for the current run
+    model = GAE(
+        encoder=RGCNEncoder(num_nodes=data.num_nodes, h_dim=opt.hidden_dim,
+                            out_dim=opt.out_dim, num_rels=dataset.num_relations // 2,
+                            num_bases=opt.num_bases, num_h_layers=opt.depth, num_blocks=opt.num_blocks),
+        decoder=RGCNDecoder(num_rels=dataset.num_relations // 2, h_dim=opt.hidden_dim)
+    )
+
+    model = model.to(opt.device)
     model.load_state_dict(torch.load(best_model_path))
     model.to(opt.device)
     try:
-        # TODO: Create a new helper function that returns the number of model parameters
-        # TODO: Also save number of parameters for the model in the wandb config
-        # TODO: Save a model architecture that was used. This should include the layer information,
-        #  similarly to how torch returns the architecture.
-        #  Maybe even as an image if it can be visualized with some library
-        # pytorch_total_params = sum(p.numel() for p in model.parameters())
-        # print(pytorch_total_params)
-        eval_metrics = validation(model=model, data=data, opt=opt, save_images=opt.save_test_images)
-        eval_metrics.update(create_wandb_val_plots(val_metrics=eval_metrics, save_images=opt.save_test_images))
-        del_wandb_val_untracked_metrics(val_metrics=eval_metrics)
+        eval_metrics = validation(model=model, data=data, edge_index=data.test_edge_index,
+                                  edge_type=data.test_edge_type, opt=opt)
         wandb.log(eval_metrics)
         wb_run_eval.finish()
     except FileNotFoundError as e:
         wb_run_eval.finish()
-        # wb_run_eval.delete()  # Delete eval run if an error has occurred
-        # wb_run_train.delete()  # Delete train run also if an error has occurred
         print(f"Exception happened for model {model_id}\n {e}")
         return [model_id, *args], {
             **kwargs}, True  # Run Failed is True
-    # TODO: Add our own code for removing models from the wandb folder during training.
     return [model_id, *args], {**kwargs}, False  # Run Failed is False
-
-
-def create_wandb_train_plots(train_metrics):
-    return {
-        "train_confusion_matrix": wandb.plot.confusion_matrix(probs=train_metrics['train_global_probs'],
-                                                              y_true=train_metrics['train_global_target'],
-                                                              class_names=['ellipse', 'square', 'triangle'],
-                                                              title="Train confusion matrix"),
-        "train_roc": wandb.plot.roc_curve(y_true=train_metrics['train_global_target'],
-                                          y_probas=train_metrics['train_global_probs'],
-                                          labels=['ellipse', 'square', 'triangle'],
-                                          # TODO: Determine why classes_to_plot doesn't work with roc
-                                          # classes_to_plot=['ellipse', 'square', 'triangle'],
-                                          title="Train ROC", ),
-    }
-
-
-def create_wandb_val_plots(val_metrics, save_images=False):
-    val_mistakes_data = [[val_metrics["val_incorrect_img_paths"][i], val_metrics["val_diff_mistakes"][i],
-                          val_metrics["val_shapes_mistakes"][i],
-                          wandb.Image(data_or_path=val_metrics["val_incorrect_images"][i],
-                                      caption=val_metrics["val_incorrect_img_paths"][i]) if save_images else None,
-                          val_metrics["val_incorrect_img_predictions"][i],
-                          val_metrics["val_incorrect_img_labels"][i]] for i in
-                         range(len(val_metrics["val_incorrect_img_paths"]))]
-    return {
-
-        "val_confusion_matrix": wandb.plot.confusion_matrix(probs=val_metrics["val_global_probs"],
-                                                            y_true=val_metrics["val_global_target"],
-                                                            class_names=['ellipse', 'square', 'triangle'],
-                                                            title="Validation confusion matrix"),
-        "val_roc": wandb.plot.roc_curve(y_true=val_metrics["val_global_target"],
-                                        y_probas=val_metrics["val_global_probs"],
-                                        labels=['ellipse', 'square', 'triangle'],
-                                        # classes_to_plot=['ellipse', 'square', 'triangle'],
-                                        title="Validation ROC", ),
-        "val_mistakes_by_diff_bar": wandb.plot.bar(
-            table=wandb.Table(
-                data=np.asarray([[d, val_metrics["val_diff_mistakes"].count(d)] for d in range(1, 5)]),
-                columns=["difficulty", "mistakes"]),
-            value="mistakes", label="difficulty", title="Mistakes by difficulty"),
-        "val_mistakes_by_shape_bar": wandb.plot.bar(
-            table=wandb.Table(data=np.asarray([[d, val_metrics["val_shapes_mistakes"].count(d)] for d in
-                                               set(val_metrics["val_shapes_mistakes"])]),
-                              columns=["shapes", "mistakes"]),
-            value="mistakes", label="shapes", title="Mistakes by shape"),
-        "val_mistakes_by_shape_diff_bar": wandb.plot.bar(
-            table=wandb.Table(
-                data=np.asarray([[d, val_metrics["val_shape_diff_mistakes"].count(d)] for d in
-                                 set(val_metrics["val_shape_diff_mistakes"])]),
-                columns=["shape_and_difficulty", "mistakes"]),
-            value="mistakes", label="shape_and_difficulty", title="Mistakes by shape and difficulty"),
-        "val_mistakes_table": wandb.Table(data=val_mistakes_data,
-                                          columns=['path', 'difficulty', 'shape', 'image', 'prediction',
-                                                   'label']),
-    }
-
-
-def del_wandb_train_untracked_metrics(train_metrics):
-    del train_metrics["train_global_probs"]
-    del train_metrics["train_global_target"]
-
-
-def del_wandb_val_untracked_metrics(val_metrics):
-    val_metrics.pop("val_global_probs", None)
-    val_metrics.pop("val_global_target", None)
-    val_metrics.pop("val_diff_mistakes", None)
-    val_metrics.pop("val_shapes_mistakes", None)
-    val_metrics.pop("val_shape_diff_mistakes", None)
-    val_metrics.pop("val_incorrect_img_paths", None)
-    val_metrics.pop("val_incorrect_images", None)
-    val_metrics.pop("val_incorrect_img_predictions", None)
-    val_metrics.pop("val_incorrect_img_labels", None)
 
 
 def main():
