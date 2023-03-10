@@ -231,6 +231,7 @@ def create_arg_parser(model_choices=None, optimizer_choices=None, scheduler_choi
     parser.add_argument('-hidden_dim', '--hidden_dim', type=int, default=8, help="Number of hidden dims")
     parser.add_argument('-out_dim', '--out_dim', type=int, default=8, help="Number of out channels")
     parser.add_argument('-num_bases', '--num_bases', type=int, default=8, help="Number of bases")
+    parser.add_argument('-num_blocks', '--num_blocks', type=int, default=5, help="Number of bases")
     parser.add_argument('-mlp_dim', '--mlp_dim', type=int, default=3,
                         help="Dimension of mlp at the end of the model. Should be the same as the number of classes")
     parser.add_argument('-dropout', '--dropout', type=float, default=0.2, help="Dropout used in models")
@@ -396,7 +397,7 @@ def run_experiment(model_id, *args, **kwargs):
     # Define model
     model = model_choices[opt.model](num_nodes=data_loader.dataset.data.num_nodes, h_dim=opt.hidden_dim,
                                      out_dim=opt.out_dim, num_rels=len(np.unique(data_loader.dataset.data.edge_type)),
-                                     num_bases=opt.num_bases, num_h_layers=opt.depth)
+                                     num_bases=opt.num_bases, num_h_layers=opt.depth, num_blocks=opt.num_blocks)
 
     model = model.to(opt.device)
 
