@@ -1,4 +1,3 @@
-import os
 import argparse
 import os
 import random
@@ -31,12 +30,13 @@ def get_data_loader(opt):
 
 def train(model, optimizer, data, opt):
     model.train()
+    optimizer.zero_grad()
 
     start_time = timeit.default_timer()
 
     enc = model.encode(data.edge_index, data.edge_type)
     pos_pred = model.decode(enc, data.train_edge_index, data.train_edge_type)
-    neg_edge_index = negative_sampling(data.train_edge_index, data.num_nodes)
+    neg_edge_index = negative_sampling(data.train_edge_index, data.num_nodes, opt)
     neg_pred = model.decode(enc, neg_edge_index, data.train_edge_type)
     out = torch.cat([pos_pred, neg_pred])
     gt = torch.cat([torch.ones_like(pos_pred), torch.zeros_like(neg_pred)])
@@ -58,7 +58,7 @@ def train(model, optimizer, data, opt):
 
 
 @torch.no_grad()
-def validation(model, data, edge_index, edge_type, opt, save_images=False):
+def validation(model, data, edge_index, edge_type, opt):
     model.eval()
     start_time = timeit.default_timer()
 
@@ -144,7 +144,7 @@ def create_arg_parser(model_choices=None, optimizer_choices=None, scheduler_choi
                         help="Add a list of tags that describe the run.")
 
     # Dataset options
-    parser.add_argument('-d', '--dataset', type=str, default="data/wordnet18rrtemp",
+    parser.add_argument('-d', '--dataset', type=str, default="data/FB15K-237",
                         help="Path to the dataset")
     parser.add_argument('-b', '--batch_size', type=int, default=1, help="Batch size")
     parser.add_argument('-shuffle', '--shuffle', type=bool, default=False, help="Shuffle dataset")
@@ -157,10 +157,10 @@ def create_arg_parser(model_choices=None, optimizer_choices=None, scheduler_choi
                         help=f"Model to be used for training {model_choices.keys()}")
     # - RGCN
     parser.add_argument('-depth', '--depth', type=int, default=0, help="Model depth")
-    parser.add_argument('-hidden_dim', '--hidden_dim', type=int, default=8, help="Number of hidden dims")
-    parser.add_argument('-out_dim', '--out_dim', type=int, default=8, help="Number of out channels")
-    parser.add_argument('-num_bases', '--num_bases', type=int, default=8, help="Number of bases")
-    parser.add_argument('-num_blocks', '--num_blocks', type=int, default=5, help="Number of bases")
+    parser.add_argument('-hidden_dim', '--hidden_dim', type=int, default=100, help="Number of hidden dims")
+    parser.add_argument('-out_dim', '--out_dim', type=int, default=100, help="Number of out channels")
+    parser.add_argument('-num_bases', '--num_bases', type=int, default=None, help="Number of bases")
+    parser.add_argument('-num_blocks', '--num_blocks', type=int, default=5, help="Number of blocks")
     parser.add_argument('-mlp_dim', '--mlp_dim', type=int, default=3,
                         help="Dimension of mlp at the end of the model. Should be the same as the number of classes")
     parser.add_argument('-dropout', '--dropout', type=float, default=0.2, help="Dropout used in models")
@@ -168,8 +168,10 @@ def create_arg_parser(model_choices=None, optimizer_choices=None, scheduler_choi
     # Training options
     parser.add_argument('-device', '--device', type=str, default='cuda', help="Device to be used")
     parser.add_argument('-e', '--n_epochs', type=int, default=500, help="Max number of epochs for the current model")
-    parser.add_argument('-max_e', '--max_epochs', type=int, default=500, help="Maximum number of epochs for all models")
-    parser.add_argument('-min_e', '--min_epochs', type=int, default=500, help="Minimum number of epochs for all models")
+    parser.add_argument('-max_e', '--max_epochs', type=int, default=500,
+                        help="Maximum number of epochs for all models")
+    parser.add_argument('-min_e', '--min_epochs', type=int, default=500,
+                        help="Minimum number of epochs for all models")
     parser.add_argument('-nm', '--n_models', type=int, default=1, help="Number of models to be trained")
     parser.add_argument('-pp', '--parallel_processes', type=int, default=1,
                         help="Number of parallel processes to spawn for models [0 for all available cores]")
@@ -180,7 +182,7 @@ def create_arg_parser(model_choices=None, optimizer_choices=None, scheduler_choi
     parser.add_argument('-optim', '--optimizer', type=str.lower, default="adam",
                         choices=optimizer_choices.keys(),
                         help=f'Optimizer to be used {optimizer_choices.keys()}')
-    parser.add_argument('-lr', '--learning_rate', type=float, default=3e-4, help="Learning rate")
+    parser.add_argument('-lr', '--learning_rate', type=float, default=0.01, help="Learning rate")
     parser.add_argument('-wd', '--weight_decay', type=float, default=0.05, help="Weight decay for optimizer")
     parser.add_argument('-momentum', '--momentum', type=float, default=0.9,
                         help="Momentum value for optimizers like SGD")
@@ -298,14 +300,15 @@ def compute_rank(ranks):
     return (optimistic + pessimistic).float() * 0.5
 
 
-def negative_sampling(edge_index, num_nodes):
+def negative_sampling(edge_index, num_nodes, opt):
     # Sample edges by corrupting either the subject or the object of each edge.
     mask_1 = torch.rand(edge_index.size(1)) < 0.5
     mask_2 = ~mask_1
-
+    mask_1.to(opt.device)
+    mask_2.to(opt.device)
     neg_edge_index = edge_index.clone()
-    neg_edge_index[0, mask_1] = torch.randint(num_nodes, (mask_1.sum(),))
-    neg_edge_index[1, mask_2] = torch.randint(num_nodes, (mask_2.sum(),))
+    neg_edge_index[0, mask_1] = torch.randint(num_nodes, (mask_1.sum(),), device=opt.device)
+    neg_edge_index[1, mask_2] = torch.randint(num_nodes, (mask_2.sum(),), device=opt.device)
     return neg_edge_index
 
 
@@ -331,6 +334,7 @@ def run_experiment(model_id, *args, **kwargs):
 
     dataset = RelLinkPredDataset(opt.dataset, 'FB15k-237')
     data = dataset[0]
+    data.to(opt.device)
 
     wb_run_train = wandb.init(entity=opt.entity, project=opt.project_name, group=opt.group,
                               # save_code=True, # Pycharm complains about duplicate code fragments
@@ -350,8 +354,7 @@ def run_experiment(model_id, *args, **kwargs):
 
     model = model.to(opt.device)
 
-    optimizer = optimizer_choices[opt.optimizer](params=model.parameters(), lr=opt.learning_rate,
-                                                 weight_decay=opt.weight_decay)
+    optimizer = optimizer_choices[opt.optimizer](params=model.parameters(), lr=opt.learning_rate, )
 
     best_model_mrr = -np.Inf
     best_model_path = None
@@ -363,23 +366,23 @@ def run_experiment(model_id, *args, **kwargs):
         for epoch in range(1, opt.n_epochs + 1):
             print(f"{epoch=}")
             train_metrics = train(model=model, optimizer=optimizer, data=data, opt=opt)
-            val_metrics = validation(model=model, optimizer=optimizer, data=data, edge_index=data.valid_edge_index,
-                                     edge_type=data.valid_edge_type, opt=opt)
-
+            print(f"Train epoch loss: {train_metrics['train_epoch_loss']}")
             wandb.log(train_metrics)
-            wandb.log(val_metrics)
-
-            if val_metrics['mrr'] > best_model_mrr:
-                print(f"Saving model with new best {val_metrics['mrr']=}")
-                best_model_mrr, best_epoch = val_metrics['mrr'], epoch
-                Path(f'experiments/{opt.group}').mkdir(exist_ok=True, parents=True)
-                new_best_path = os.path.join(f'experiments/{opt.group}',
-                                             f'train-{opt.group}-{model_id}-max_epochs{opt.n_epochs}-epoch{epoch}'
-                                             f'-metric{val_metrics["mrr"]:.4f}.pt')
-                torch.save(model.state_dict(), new_best_path)
-                if best_model_path:
-                    os.remove(best_model_path)
-                best_model_path = new_best_path
+            if epoch % 100 == 0:
+                val_metrics = validation(model=model, data=data, edge_index=data.valid_edge_index,
+                                         edge_type=data.valid_edge_type, opt=opt)
+                wandb.log(val_metrics)
+                if val_metrics['mrr'] > best_model_mrr:
+                    print(f"Saving model with new best {val_metrics['mrr']=}")
+                    best_model_mrr, best_epoch = val_metrics['mrr'], epoch
+                    Path(f'experiments/{opt.group}').mkdir(exist_ok=True, parents=True)
+                    new_best_path = os.path.join(f'experiments/{opt.group}',
+                                                 f'train-{opt.group}-{model_id}-max_epochs{opt.n_epochs}-epoch{epoch}'
+                                                 f'-metric{val_metrics["mrr"]:.4f}.pt')
+                    torch.save(model.state_dict(), new_best_path)
+                    if best_model_path:
+                        os.remove(best_model_path)
+                    best_model_path = new_best_path
 
         if opt.save_model_wandb:
             artifact.add_file(best_model_path)

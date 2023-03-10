@@ -13,7 +13,7 @@ class RGCNEncoder(torch.nn.Module):
     https://github.com/pyg-team/pytorch_geometric/blob/master/examples/rgcn_link_pred.py
     """
 
-    def __init__(self, num_nodes, h_dim, out_dim, num_rels, num_bases=-1, num_h_layers=1, num_blocks=5):
+    def __init__(self, num_nodes, h_dim, out_dim, num_rels, num_bases=None, num_h_layers=1, num_blocks=5):
         super().__init__()
         self.num_nodes = num_nodes
         self.h_dim = h_dim
@@ -36,9 +36,8 @@ class RGCNEncoder(torch.nn.Module):
         for layer in self.layers:
             layer.reset_parameters()
 
-    def forward(self, data):
-        x, edge_index, edge_type = data.x, data.edge_index, data.edge_type
-
+    def forward(self, edge_index, edge_type):
+        x = self.node_emb
         # Encoder
         for i in range(len(self.layers) - 1):
             x = self.layers[i](x, edge_index, edge_type)
