@@ -440,7 +440,7 @@ def run_experiment(model_id, *args, **kwargs):
             if val_metrics['val_f1_macro'] > best_model_f1_macro:
                 print(f"Saving model with new best {val_metrics['val_f1_macro']=}")
                 best_model_f1_macro, best_epoch = val_metrics['val_f1_macro'], epoch
-                Path(f'experiments/{opt.group}').mkdir(exist_ok=True)
+                Path(f'experiments/{opt.group}').mkdir(exist_ok=True, parents=True)
                 new_best_path = os.path.join(f'experiments/{opt.group}',
                                              f'train-{opt.group}-{model_id}-max_epochs{opt.n_epochs}-epoch{epoch}'
                                              f'-metric{val_metrics["val_f1_macro"]:.4f}.pt')
