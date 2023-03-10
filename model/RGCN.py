@@ -27,10 +27,13 @@ class RGCN(torch.nn.Module):
             self.layers.append(RGCNConv(self.h_dim, self.h_dim, self.num_rels, self.num_bases, num_blocks))
         self.layers.append(
             RGCNConv(self.h_dim, self.out_dim, self.num_rels, self.num_bases))
+
+        self.rel_emb = Parameter(torch.Tensor(self.num_rels, self.h_dim))
         self.reset_parameters()
 
     def reset_parameters(self):
         torch.nn.init.xavier_uniform_(self.node_emb)
+        torch.nn.init.xavier_uniform_(self.rel_emb)
         for layer in self.layers:
             layer.reset_parameters()
 
@@ -42,4 +45,6 @@ class RGCN(torch.nn.Module):
             x = F.relu(x)
             x = F.dropout(x, training=self.training)
         x = self.layers[-1](x, edge_index, edge_type)
-        return x
+        src, dst = x[edge_index[0], x[edge_index[1]]]
+        rel = self.rel_emb[edge_type]
+        return torch.sum(src * dst * rel, dim=1)
