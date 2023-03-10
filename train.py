@@ -21,7 +21,7 @@ import numpy as np
 import torch
 from torch_geometric.loader import DataLoader
 from torch_geometric.datasets import word_net
-from torch_geometric.nn import GCN, RGCNConv, FastRGCNConv
+from torch_geometric.nn import GCN, RGCNConv, FastRGCNConv, GAE
 import torch.nn.functional as F
 from torch_geometric.nn import GCNConv
 from torch_geometric.transforms import NormalizeFeatures
@@ -30,7 +30,7 @@ from torch_geometric.nn.conv.rgcn_conv import RGCNConv
 from torch_geometric.loader.dataloader import DataLoader
 
 import wandb
-from model.RGCN import RGCN
+from model.RGCN import RGCN, RGCNEncoder, RGCNDecoder
 
 
 def get_data_loader(opt):
@@ -395,9 +395,13 @@ def run_experiment(model_id, *args, **kwargs):
                               )
 
     # Define model
-    model = model_choices[opt.model](num_nodes=data_loader.dataset.data.num_nodes, h_dim=opt.hidden_dim,
+    model = GAE(
+        encoder=RGCNEncoder(num_nodes=data_loader.dataset.data.num_nodes, h_dim=opt.hidden_dim,
                                      out_dim=opt.out_dim, num_rels=len(np.unique(data_loader.dataset.data.edge_type)),
-                                     num_bases=opt.num_bases, num_h_layers=opt.depth, num_blocks=opt.num_blocks)
+                                     num_bases=opt.num_bases, num_h_layers=opt.depth, num_blocks=opt.num_blocks),
+        decoder=RGCNDecoder(num_rels=len(np.unique(data_loader.dataset.data.edge_type)), h_dim=opt.hidden_dim)
+    )
+
 
     model = model.to(opt.device)
 
