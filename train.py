@@ -20,7 +20,7 @@ import argparse
 import numpy as np
 import torch
 from torch_geometric.loader import DataLoader
-from torch_geometric.datasets import word_net
+from torch_geometric.datasets import word_net, RelLinkPredDataset
 from torch_geometric.nn import GCN, RGCNConv, FastRGCNConv, GAE
 import torch.nn.functional as F
 from torch_geometric.nn import GCNConv
@@ -28,9 +28,10 @@ from torch_geometric.transforms import NormalizeFeatures
 import torch_geometric.datasets.word_net
 from torch_geometric.nn.conv.rgcn_conv import RGCNConv
 from torch_geometric.loader.dataloader import DataLoader
+from tqdm import tqdm
 
 import wandb
-from model.RGCN import RGCN, RGCNEncoder, RGCNDecoder
+from model.RGCN import RGCNEncoder, RGCNDecoder
 
 
 def get_data_loader(opt):
@@ -39,69 +40,30 @@ def get_data_loader(opt):
     return loader
 
 
-def train(model, optimizer, data_loader, opt, scheduler=None):
+def train(model, optimizer, data, opt):
     model.train()
-    total_samples = len(data_loader.dataset)
-
-    global_target = torch.tensor([], device=opt.device)
-    global_pred = torch.tensor([], device=opt.device)
-    global_probs = torch.empty((0, 3), device=opt.device)
-
-    running_loss = 0.0
-
-    metrics = MetricCollection({'train_f1_micro': MulticlassF1Score(num_classes=opt.num_classes, average='micro'),
-                                'train_f1_macro': MulticlassF1Score(num_classes=opt.num_classes, average='macro'),
-                                'train_precision': MulticlassPrecision(num_classes=opt.num_classes),
-                                'train_recall': MulticlassRecall(num_classes=opt.num_classes),
-                                }
-                               ).to(opt.device)
-    auroc = MulticlassAUROC(num_classes=opt.num_classes, average='macro').to(opt.device)
 
     start_time = timeit.default_timer()
-    for i, (data, target, path) in enumerate(data_loader):
-        data = data.to(opt.device)
-        target = target.to(opt.device)
-        optimizer.zero_grad()
-        predictions = model(data)
-        probs = F.softmax(predictions, dim=1)
-        _, pred = torch.max(probs, dim=1)
 
-        loss = F.nll_loss(probs, target)
-        loss.backward()
-        optimizer.step()
-        if scheduler:
-            scheduler.step()
+    enc = model.encode(data.edge_index, data.edge_type)
+    pos_pred = model.decode(enc, data.train_edge_index, data.train_edge_type)
+    neg_edge_index = negative_sampling(data.train_edge_index, data.num_nodes)
+    neg_pred = model.decode(enc, neg_edge_index, data.train_edge_type)
+    out = torch.cat([pos_pred, neg_pred])
+    gt = torch.cat([torch.ones_like(pos_pred), torch.zeros_like(neg_pred)])
+    cross_entropy_loss = F.binary_cross_entropy_with_logits(out, gt)
+    reg_loss = enc.pow(2).mean() + model.decoder.rel_emb.pow(2).mean()
+    loss = cross_entropy_loss + 1e-2 * reg_loss
 
-        metrics(pred, target)
-        global_target = torch.concatenate((global_target, target))
-        global_pred = torch.concatenate((global_pred, pred))
-        global_probs = torch.vstack((global_probs, probs))
-
-        running_loss += loss.item() * data.size(0)
-
-        if i % 5 == 0 and scheduler:
-            wandb.log({"train_lr": scheduler.get_last_lr()[0]},
-                      # commit=False, # Commit=False just accumulates data
-                      )
-
-    epoch_loss = running_loss / total_samples
+    loss.backward()
+    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.)
+    optimizer.step()
 
     epoch_time = timeit.default_timer() - start_time
     print(f"Epoch time {epoch_time}")
 
-    auroc(global_probs, global_target.long())
-    global_target = global_target.cpu().detach().numpy()
-    global_pred = global_pred.cpu().detach().numpy()
-    global_probs = global_probs.cpu().detach().numpy()
     log_metrics = {
-        **metrics.compute(),
-        "train_epoch_loss": epoch_loss,
-        "train_epoch_time": epoch_time,
-        "train_auroc_macro": auroc.compute(),
-        # Values below are used for constructing the wandb plots and tables.
-        # They should be deleted after they are used for creating plots and tables, and they should not be logged
-        "train_global_probs": global_probs,
-        "train_global_target": global_target,
+        "train_epoch_loss": float(loss),
     }
     return log_metrics
 
@@ -238,17 +200,17 @@ def create_arg_parser(model_choices=None, optimizer_choices=None, scheduler_choi
 
     # Training options
     parser.add_argument('-device', '--device', type=str, default='cuda', help="Device to be used")
-    parser.add_argument('-e', '--n_epochs', type=int, default=50, help="Max number of epochs for the current model")
-    parser.add_argument('-max_e', '--max_epochs', type=int, default=20, help="Maximum number of epochs for all models")
-    parser.add_argument('-min_e', '--min_epochs', type=int, default=5, help="Minimum number of epochs for all models")
-    parser.add_argument('-nm', '--n_models', type=int, default=50, help="Number of models to be trained")
+    parser.add_argument('-e', '--n_epochs', type=int, default=500, help="Max number of epochs for the current model")
+    parser.add_argument('-max_e', '--max_epochs', type=int, default=500, help="Maximum number of epochs for all models")
+    parser.add_argument('-min_e', '--min_epochs', type=int, default=500, help="Minimum number of epochs for all models")
+    parser.add_argument('-nm', '--n_models', type=int, default=1, help="Number of models to be trained")
     parser.add_argument('-pp', '--parallel_processes', type=int, default=1,
                         help="Number of parallel processes to spawn for models [0 for all available cores]")
     parser.add_argument('-seed_everything', '--seed_everything', type=int, default=-1,
                         help="Set random seed for everything")
 
     # Optimizer options
-    parser.add_argument('-optim', '--optimizer', type=str.lower, default="adamw",
+    parser.add_argument('-optim', '--optimizer', type=str.lower, default="adam",
                         choices=optimizer_choices.keys(),
                         help=f'Optimizer to be used {optimizer_choices.keys()}')
     parser.add_argument('-lr', '--learning_rate', type=float, default=3e-4, help="Learning rate")
@@ -359,9 +321,34 @@ def key_pair(module) -> tuple:
     return module.__name__.lower(), module
 
 
+# Rank computation from
+# https://github.com/pyg-team/pytorch_geometric/blob/master/examples/rgcn_link_pred.py
+@torch.no_grad()
+def compute_rank(ranks):
+    # fair ranking prediction as the average
+    # of optimistic and pessimistic ranking
+    true = ranks[0]
+    optimistic = (ranks > true).sum() + 1
+    pessimistic = (ranks >= true).sum()
+    return (optimistic + pessimistic).float() * 0.5
+
+
+# Dataset sampling from
+# https://github.com/pyg-team/pytorch_geometric/blob/master/examples/rgcn_link_pred.py
+def negative_sampling(edge_index, num_nodes):
+    # Sample edges by corrupting either the subject or the object of each edge.
+    mask_1 = torch.rand(edge_index.size(1)) < 0.5
+    mask_2 = ~mask_1
+
+    neg_edge_index = edge_index.clone()
+    neg_edge_index[0, mask_1] = torch.randint(num_nodes, (mask_1.sum(),))
+    neg_edge_index[1, mask_2] = torch.randint(num_nodes, (mask_2.sum(),))
+    return neg_edge_index
+
+
 def run_experiment(model_id, *args, **kwargs):
-    model_choices = dict(map(key_pair, [RGCN]))
-    optimizer_choices = dict(map(key_pair, [optim.AdamW, optim.SGD]))
+    model_choices = dict(map(key_pair, []))
+    optimizer_choices = dict(map(key_pair, [optim.AdamW, optim.SGD, optim.Adam]))
     scheduler_choices = dict(map(key_pair, [optim.lr_scheduler.CyclicLR]))
 
     parser = create_arg_parser(model_choices=model_choices, optimizer_choices=optimizer_choices,
@@ -379,12 +366,8 @@ def run_experiment(model_id, *args, **kwargs):
     if opt.device == 'cuda':
         print(f'GPU {torch.cuda.get_device_name(0)}')
 
-    data_loader = get_data_loader(opt)
-
-    # TODO: Determine optimal step_size_up for cyclicLR scheduler.
-    # TODO: Change step_size_up formula for graph dataset
-    if opt.step_size_up <= 0:
-        opt.step_size_up = 2 * len(data_loader.dataset) // opt.batch_size
+    dataset = RelLinkPredDataset(opt.dataset, 'FB15k-237')
+    data = dataset[0]
 
     wb_run_train = wandb.init(entity=opt.entity, project=opt.project_name, group=opt.group,
                               # save_code=True, # Pycharm complains about duplicate code fragments
@@ -396,25 +379,16 @@ def run_experiment(model_id, *args, **kwargs):
 
     # Define model
     model = GAE(
-        encoder=RGCNEncoder(num_nodes=data_loader.dataset.data.num_nodes, h_dim=opt.hidden_dim,
-                                     out_dim=opt.out_dim, num_rels=len(np.unique(data_loader.dataset.data.edge_type)),
-                                     num_bases=opt.num_bases, num_h_layers=opt.depth, num_blocks=opt.num_blocks),
-        decoder=RGCNDecoder(num_rels=len(np.unique(data_loader.dataset.data.edge_type)), h_dim=opt.hidden_dim)
+        encoder=RGCNEncoder(num_nodes=data.num_nodes, h_dim=opt.hidden_dim,
+                            out_dim=opt.out_dim, num_rels=dataset.num_relations // 2,
+                            num_bases=opt.num_bases, num_h_layers=opt.depth, num_blocks=opt.num_blocks),
+        decoder=RGCNDecoder(num_rels=dataset.num_relations // 2, h_dim=opt.hidden_dim)
     )
-
 
     model = model.to(opt.device)
 
-    # TODO: Optimize hyper-params with WandB Sweeper
     optimizer = optimizer_choices[opt.optimizer](params=model.parameters(), lr=opt.learning_rate,
                                                  weight_decay=opt.weight_decay)
-
-    scheduler = scheduler_choices[opt.scheduler](optimizer=optimizer, base_lr=opt.base_lr, max_lr=opt.max_lr,
-                                                 step_size_up=opt.step_size_up,
-                                                 cycle_momentum=opt.cycle_momentum, mode=opt.scheduler_mode)
-
-    # For watching gradients
-    #  wandb.watch(net, log='all')
 
     best_model_f1_macro = -np.Inf
     best_model_path = None
@@ -423,14 +397,11 @@ def run_experiment(model_id, *args, **kwargs):
         type='model')
 
     try:
-        # TODO: Add training resuming. This can be done from the model saved in wandb or from the local model
         for epoch in range(1, opt.n_epochs + 1):
             print(f"{epoch=}")
-            train_metrics = train(model=model, optimizer=optimizer, data_loader=data_loader, opt=opt,
-                                  scheduler=scheduler)
-            val_metrics = validation(model=model, data_loader=data_loader, opt=opt, save_images=opt.save_val_images)
+            train_metrics = train(model=model, optimizer=optimizer, data=data, opt=opt)
+            val_metrics = validation(model=model, optimizer=optimizer, data=data, opt=opt)
 
-            # TODO: Add early stopping - Maybe not needed for this experiment. In that case log tables before ending
             last = epoch >= opt.n_epochs
             if last:
                 train_metrics.update(create_wandb_train_plots(train_metrics=train_metrics))
@@ -498,7 +469,7 @@ def run_experiment(model_id, *args, **kwargs):
         #  Maybe even as an image if it can be visualized with some library
         # pytorch_total_params = sum(p.numel() for p in model.parameters())
         # print(pytorch_total_params)
-        eval_metrics = validation(model=model, data_loader=data_loader, opt=opt, save_images=opt.save_test_images)
+        eval_metrics = validation(model=model, data=data, opt=opt, save_images=opt.save_test_images)
         eval_metrics.update(create_wandb_val_plots(val_metrics=eval_metrics, save_images=opt.save_test_images))
         del_wandb_val_untracked_metrics(val_metrics=eval_metrics)
         wandb.log(eval_metrics)
